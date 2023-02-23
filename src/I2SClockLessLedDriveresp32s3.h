@@ -204,23 +204,18 @@ static void IRAM_ATTR transpose16x1_noinline2(unsigned char *A, uint16_t *B) {
 }
 
 esp_lcd_panel_io_handle_t led_io_handle = NULL;
+esp_lcd_i80_bus_handle_t i80_bus = NULL;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 void _initled(uint8_t *leds, int *pins, int numstrip, int NUM_LED_PER_STRIP) {
 
-  // esp_lcd_panel_io_handle_t init_lcd_driver(unsigned int
-  // CLOCKLESS_PIXEL_CLOCK_HZ, size_t _nb_components) {
-
-  esp_lcd_i80_bus_handle_t i80_bus = NULL;
-
   esp_lcd_i80_bus_config_t bus_config;
 
   bus_config.clk_src = LCD_CLK_SRC_PLL160M;
   bus_config.dc_gpio_num = 0;
   bus_config.wr_gpio_num = 0;
-  // bus_config.data_gpio_nums = (int*)malloc(16*sizeof(int));
   for (int i = 0; i < numstrip; i++) {
     bus_config.data_gpio_nums[i] = pins[i];
   }
@@ -264,93 +259,52 @@ void _initled(uint8_t *leds, int *pins, int numstrip, int NUM_LED_PER_STRIP) {
 class I2SClocklessLedDriveresp32S3 {
 
 public:
-  uint16_t *buffers[2];
   uint16_t *led_output = NULL;
-  uint16_t *led_output2 = NULL;
   uint8_t *ledsbuff = NULL;
   int num_leds_per_strip;
   int _numstrips;
-  int currentframe;
-
-  uint8_t __green_map[256];
-  uint8_t __blue_map[256];
-  uint8_t __red_map[256];
-  uint8_t __white_map[256];
-  uint8_t _brightness;
-  float _gammar, _gammab, _gammag, _gammaw;
-
-  void setBrightness(int brightness) {
-    _brightness = brightness;
-    float tmp;
-    for (int i = 0; i < 256; i++) {
-      tmp = powf((float)i / 255, 1 / _gammag);
-      __green_map[i] = (uint8_t)(tmp * brightness);
-      tmp = powf((float)i / 255, 1 / _gammag);
-      __blue_map[i] = (uint8_t)(tmp * brightness);
-      tmp = powf((float)i / 255, 1 / _gammag);
-      __red_map[i] = (uint8_t)(tmp * brightness);
-      tmp = powf((float)i / 255, 1 / _gammag);
-      __white_map[i] = (uint8_t)(tmp * brightness);
-    }
-  }
-
-  void setGamma(float gammar, float gammab, float gammag, float gammaw) {
-    _gammag = gammag;
-    _gammar = gammar;
-    _gammaw = gammaw;
-    _gammab = gammab;
-    setBrightness(_brightness);
-  }
-
-  void setGamma(float gammar, float gammab, float gammag) {
-    _gammag = gammag;
-    _gammar = gammar;
-    _gammab = gammab;
-    setBrightness(_brightness);
-  }
 
   void initled(uint8_t *leds, int *pins, int numstrip, int NUM_LED_PER_STRIP) {
-    currentframe = 0;
-    _gammab = 1;
-    _gammar = 1;
-    _gammag = 1;
-    _gammaw = 1;
-    setBrightness(255);
-    if (I2SClocklessLedDriverS3_sem == NULL) {
-      I2SClocklessLedDriverS3_sem = xSemaphoreCreateBinary();
-    }
-    // esp_lcd_panel_io_handle_t init_lcd_driver(unsigned int
-    // CLOCKLESS_PIXEL_CLOCK_HZ, size_t _nb_components) {
+    auto buffer_size =
+        8 * _nb_components * NUM_LED_PER_STRIP * 3 * 2 + __OFFSET;
+
     led_output = (uint16_t *)heap_caps_aligned_alloc(
-        LCD_DRIVER_PSRAM_DATA_ALIGNMENT,
-        8 * _nb_components * NUM_LED_PER_STRIP * 3 * 2 + __OFFSET,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    memset(led_output, 0,
-           8 * _nb_components * NUM_LED_PER_STRIP * 3 * 2 + __OFFSET);
-    // led_output+=__OFFSET/2;
-    led_output2 = (uint16_t *)heap_caps_aligned_alloc(
-        LCD_DRIVER_PSRAM_DATA_ALIGNMENT,
-        8 * _nb_components * NUM_LED_PER_STRIP * 3 * 2 + __OFFSET,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    memset(led_output2, 0,
-           8 * _nb_components * NUM_LED_PER_STRIP * 3 * 2 + __OFFSET);
-    // led_output2+=__OFFSET/2;
+        4, buffer_size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    memset(led_output, 0, buffer_size);
+
     for (int i = 0; i < NUM_LED_PER_STRIP * _nb_components * 8; i++) {
       led_output[3 * i + 1] =
           0xFFFF; // the +1 because it's like the first value doesnt get pushed
                   // do not ask me why for now
-      led_output2[3 * i + 1] = 0xFFFF;
-      buffers[0] = led_output;
-      buffers[1] = led_output2;
     }
+
     ledsbuff = leds;
     _numstrips = numstrip;
     num_leds_per_strip = NUM_LED_PER_STRIP;
     _initled(leds, pins, numstrip, NUM_LED_PER_STRIP);
   }
 
-  void transposeAll(uint16_t *ledoutput) {
+  void deinit() {
+    if (led_io_handle != NULL) {
+      ESP_ERROR_CHECK(esp_lcd_panel_io_del(led_io_handle));
+      ESP_ERROR_CHECK(esp_lcd_del_i80_bus(i80_bus));
+      led_io_handle = NULL;
+    }
+    if (led_output != NULL) {
+      free(led_output);
+      led_output = NULL;
+    }
+  }
 
+  I2SClocklessLedDriveresp32S3() {
+    if (I2SClocklessLedDriverS3_sem == NULL) {
+      I2SClocklessLedDriverS3_sem = xSemaphoreCreateBinary();
+    }
+  }
+
+  ~I2SClocklessLedDriveresp32S3() { deinit(); }
+
+  void transposeAll(uint16_t *ledoutput) {
     uint16_t ledToDisplay = 0;
     Lines secondPixel[_nb_components];
     uint16_t *buff =
@@ -359,13 +313,11 @@ public:
     for (int j = 0; j < num_leds_per_strip; j++) {
       uint8_t *poli = ledsbuff + ledToDisplay * _nb_components;
       for (int i = 0; i < _numstrips; i++) {
-
-        secondPixel[_p_g].bytes[i] = __green_map[*(poli + 1)];
-        secondPixel[_p_r].bytes[i] = __red_map[*(poli + 0)];
-        secondPixel[_p_b].bytes[i] = __blue_map[*(poli + 2)];
+        secondPixel[_p_g].bytes[i] = *(poli + 1);
+        secondPixel[_p_r].bytes[i] = *(poli + 0);
+        secondPixel[_p_b].bytes[i] = *(poli + 2);
         if (_nb_components > 3)
-          secondPixel[3].bytes[i] = __white_map[*(poli + 3)];
-        // #endif
+          secondPixel[3].bytes[i] = *(poli + 3);
         poli += jump;
       }
       ledToDisplay++;
@@ -383,7 +335,6 @@ public:
   }
 
   void show() {
-    transposeAll(buffers[currentframe]);
     if (isDisplaying) {
       iswaiting = true;
       if (I2SClocklessLedDriverS3_sem == NULL)
@@ -391,9 +342,9 @@ public:
       xSemaphoreTake(I2SClocklessLedDriverS3_sem, portMAX_DELAY);
     }
     isDisplaying = true;
-    led_io_handle->tx_color(led_io_handle, 0x2C, buffers[currentframe],
+    transposeAll(led_output);
+    led_io_handle->tx_color(led_io_handle, 0x2C, led_output,
                             _nb_components * num_leds_per_strip * 8 * 3 * 2 +
                                 __OFFSET);
-    currentframe = (currentframe + 1) % 2;
   }
 };
