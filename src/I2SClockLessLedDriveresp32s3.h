@@ -90,48 +90,6 @@
 #define LCD_DRIVER_PSRAM_DATA_ALIGNMENT 64
 #define CLOCKLESS_PIXEL_CLOCK_HZ (24 * 100 * 1000)
 
-typedef union {
-  uint8_t bytes[16];
-  uint32_t shorts[8];
-  uint32_t raw[2];
-} Lines;
-
-enum colorarrangment {
-  ORDER_GRBW,
-  ORDER_RGB,
-  ORDER_RBG,
-  ORDER_GRB,
-  ORDER_GBR,
-  ORDER_BRG,
-  ORDER_BGR,
-};
-
-typedef struct led_driver_t led_driver_t;
-
-struct led_driver_t {
-  size_t (*init)();
-  void (*update)(uint8_t *colors, size_t len);
-};
-
-volatile xSemaphoreHandle I2SClocklessLedDriverS3_sem = NULL;
-volatile bool isDisplaying = false;
-volatile bool iswaiting = false;
-
-static bool IRAM_ATTR flush_ready(esp_lcd_panel_io_handle_t panel_io,
-                                  esp_lcd_panel_io_event_data_t *edata,
-                                  void *user_ctx) {
-  // printf("we're here");
-  isDisplaying = false;
-  if (iswaiting) {
-    portBASE_TYPE HPTaskAwoken = 0;
-    iswaiting = false;
-    xSemaphoreGiveFromISR(I2SClocklessLedDriverS3_sem, &HPTaskAwoken);
-    if (HPTaskAwoken == pdTRUE)
-      portYIELD_FROM_ISR(HPTaskAwoken);
-  }
-  return false;
-}
-
 static void IRAM_ATTR transpose16x1_noinline2(unsigned char *A, uint16_t *B) {
 
   uint32_t x, y, x1, y1, t;
@@ -203,64 +161,98 @@ static void IRAM_ATTR transpose16x1_noinline2(unsigned char *A, uint16_t *B) {
   *((uint16_t *)(B + 21)) = (uint16_t)((y & 0xff) | ((y1 & 0xff) << 8));
 }
 
-esp_lcd_panel_io_handle_t led_io_handle = NULL;
-esp_lcd_i80_bus_handle_t i80_bus = NULL;
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-void _initled(uint8_t *leds, int *pins, int numstrip, int NUM_LED_PER_STRIP) {
-
-  esp_lcd_i80_bus_config_t bus_config;
-
-  bus_config.clk_src = LCD_CLK_SRC_PLL160M;
-  bus_config.dc_gpio_num = 0;
-  bus_config.wr_gpio_num = 0;
-  for (int i = 0; i < numstrip; i++) {
-    bus_config.data_gpio_nums[i] = pins[i];
-  }
-  if (numstrip < 16) {
-    for (int i = numstrip; i < 16; i++) {
-      bus_config.data_gpio_nums[i] = 0;
-    }
-  }
-  bus_config.bus_width = 16;
-  bus_config.max_transfer_bytes =
-      _nb_components * NUM_LED_PER_STRIP * 8 * 3 * 2 + __OFFSET;
-  bus_config.psram_trans_align = LCD_DRIVER_PSRAM_DATA_ALIGNMENT;
-  bus_config.sram_trans_align = 4;
-
-  ESP_ERROR_CHECK(esp_lcd_new_i80_bus(&bus_config, &i80_bus));
-
-  esp_lcd_panel_io_i80_config_t io_config;
-
-  io_config.cs_gpio_num = -1;
-  io_config.pclk_hz = CLOCKLESS_PIXEL_CLOCK_HZ;
-  io_config.trans_queue_depth = 1;
-  io_config.dc_levels = {
-      .dc_idle_level = 0,
-      .dc_cmd_level = 0,
-      .dc_dummy_level = 0,
-      .dc_data_level = 1,
-  };
-  //.on_color_trans_done = flush_ready,
-  // .user_ctx = nullptr,
-  io_config.lcd_cmd_bits = 0;
-  io_config.lcd_param_bits = 0;
-
-  io_config.on_color_trans_done = flush_ready;
-  ESP_ERROR_CHECK(
-      esp_lcd_new_panel_io_i80(i80_bus, &io_config, &led_io_handle));
-}
-#ifdef __cplusplus
-}
-#endif
-
 class I2SClocklessLedDriveresp32S3 {
+  typedef union {
+    uint8_t bytes[16];
+    uint32_t shorts[8];
+    uint32_t raw[2];
+  } Lines;
+
+  enum class ColorArrangement {
+    ORDER_GRBW,
+    ORDER_RGB,
+    ORDER_RBG,
+    ORDER_GRB,
+    ORDER_GBR,
+    ORDER_BRG,
+    ORDER_BGR,
+  };
+
+  esp_lcd_panel_io_handle_t io_handle = nullptr;
+  esp_lcd_i80_bus_handle_t i80_bus = nullptr;
+  xSemaphoreHandle xsemi = nullptr;
+  volatile bool isDisplaying = false;
+  volatile bool iswaiting = false;
+
+  static bool IRAM_ATTR flush_ready(esp_lcd_panel_io_handle_t panel_io,
+                                    esp_lcd_panel_io_event_data_t *edata,
+                                    void *user_ctx) {
+    // printf("we're here");
+    auto driver = (I2SClocklessLedDriveresp32S3 *)user_ctx;
+    driver->isDisplaying = false;
+    if (driver->iswaiting) {
+      portBASE_TYPE HPTaskAwoken = 0;
+      driver->iswaiting = false;
+      xSemaphoreGiveFromISR(driver->xsemi, &HPTaskAwoken);
+      if (HPTaskAwoken == pdTRUE)
+        portYIELD_FROM_ISR(HPTaskAwoken);
+    }
+    return false;
+  }
+
+  // #ifdef __cplusplus
+  // extern "C" {
+  // #endif
+  void _initled(uint8_t *leds, int *pins, int numstrip, int NUM_LED_PER_STRIP) {
+
+    esp_lcd_i80_bus_config_t bus_config;
+
+    bus_config.clk_src = LCD_CLK_SRC_PLL160M;
+    bus_config.dc_gpio_num = 0;
+    bus_config.wr_gpio_num = 0;
+    for (int i = 0; i < numstrip; i++) {
+      bus_config.data_gpio_nums[i] = pins[i];
+    }
+    if (numstrip < 16) {
+      for (int i = numstrip; i < 16; i++) {
+        bus_config.data_gpio_nums[i] = 0;
+      }
+    }
+    bus_config.bus_width = 16;
+    bus_config.max_transfer_bytes =
+        _nb_components * NUM_LED_PER_STRIP * 8 * 3 * 2 + __OFFSET;
+    bus_config.psram_trans_align = LCD_DRIVER_PSRAM_DATA_ALIGNMENT;
+    bus_config.sram_trans_align = 4;
+
+    ESP_ERROR_CHECK(esp_lcd_new_i80_bus(&bus_config, &i80_bus));
+
+    esp_lcd_panel_io_i80_config_t io_config;
+
+    io_config.cs_gpio_num = -1;
+    io_config.pclk_hz = CLOCKLESS_PIXEL_CLOCK_HZ;
+    io_config.trans_queue_depth = 1;
+    io_config.dc_levels = {
+        .dc_idle_level = 0,
+        .dc_cmd_level = 0,
+        .dc_dummy_level = 0,
+        .dc_data_level = 1,
+    };
+    //.on_color_trans_done = flush_ready,
+    // .user_ctx = nullptr,
+    io_config.lcd_cmd_bits = 0;
+    io_config.lcd_param_bits = 0;
+
+    io_config.on_color_trans_done = flush_ready;
+    io_config.user_ctx = this;
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i80(i80_bus, &io_config, &io_handle));
+  }
+  // #ifdef __cplusplus
+  // }
+  // #endif
 
 public:
-  uint16_t *led_output = NULL;
-  uint8_t *ledsbuff = NULL;
+  uint16_t *led_output = nullptr;
+  uint8_t *ledsbuff = nullptr;
   int num_leds_per_strip;
   int _numstrips;
 
@@ -285,23 +277,18 @@ public:
   }
 
   void deinit() {
-    if (led_io_handle != NULL) {
-      ESP_ERROR_CHECK(esp_lcd_panel_io_del(led_io_handle));
+    if (io_handle) {
+      ESP_ERROR_CHECK(esp_lcd_panel_io_del(io_handle));
       ESP_ERROR_CHECK(esp_lcd_del_i80_bus(i80_bus));
-      led_io_handle = NULL;
+      io_handle = nullptr;
     }
-    if (led_output != NULL) {
+    if (led_output) {
       free(led_output);
-      led_output = NULL;
+      led_output = nullptr;
     }
   }
 
-  I2SClocklessLedDriveresp32S3() {
-    if (I2SClocklessLedDriverS3_sem == NULL) {
-      I2SClocklessLedDriverS3_sem = xSemaphoreCreateBinary();
-    }
-  }
-
+  I2SClocklessLedDriveresp32S3() { xsemi = xSemaphoreCreateBinary(); }
   ~I2SClocklessLedDriveresp32S3() { deinit(); }
 
   void transposeAll(uint16_t *ledoutput) {
@@ -337,14 +324,12 @@ public:
   void show() {
     if (isDisplaying) {
       iswaiting = true;
-      if (I2SClocklessLedDriverS3_sem == NULL)
-        I2SClocklessLedDriverS3_sem = xSemaphoreCreateBinary();
-      xSemaphoreTake(I2SClocklessLedDriverS3_sem, portMAX_DELAY);
+      xSemaphoreTake(xsemi, portMAX_DELAY);
     }
     isDisplaying = true;
     transposeAll(led_output);
-    led_io_handle->tx_color(led_io_handle, 0x2C, led_output,
-                            _nb_components * num_leds_per_strip * 8 * 3 * 2 +
-                                __OFFSET);
+    io_handle->tx_color(io_handle, 0x2C, led_output,
+                        _nb_components * num_leds_per_strip * 8 * 3 * 2 +
+                            __OFFSET);
   }
 };
